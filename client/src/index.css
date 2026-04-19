@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background-color: #0a0a0f;
+    color: #e2e8f0;
+    font-family: 'Sora', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0f0f1a; }
+  ::-webkit-scrollbar-thumb { background: #e11d48; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #be123c; }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-accent hover:bg-accent-hover text-white font-semibold px-6 py-2.5 rounded-lg transition-all duration-200 active:scale-95;
+  }
+  .btn-ghost {
+    @apply border border-white/20 hover:border-accent hover:text-accent text-white/70 font-medium px-6 py-2.5 rounded-lg transition-all duration-200;
+  }
+  .card {
+    @apply bg-dark-700 border border-white/5 rounded-xl overflow-hidden hover:border-accent/30 transition-all duration-300;
+  }
+  .badge {
+    @apply text-xs font-semibold px-2 py-0.5 rounded-full;
+  }
+  .input {
+    @apply bg-dark-600 border border-white/10 text-white placeholder-white/30 rounded-lg px-4 py-3 w-full focus:outline-none focus:border-accent transition-colors;
+  }
+  .shimmer {
+    background: linear-gradient(90deg, #1a1a2e 25%, #1e1e35 50%, #1a1a2e 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+}
+
+/* Anime-style red glow effects */
+.glow-red {
+  box-shadow: 0 0 20px rgba(225, 29, 72, 0.3);
+}
+.text-glow {
+  text-shadow: 0 0 20px rgba(225, 29, 72, 0.5);
+}
+
+/* Hero gradient */
+.hero-gradient {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1e 50%, #0a0a0f 100%);
+}
+
+/* Card hover effect */
+.series-card:hover .series-overlay {
+  opacity: 1;
+}
+.series-overlay {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+/* Noise texture overlay */
+.noise::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}

@@ -1,0 +1,142 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String        @id @default(cuid())
+  email           String        @unique
+  username        String        @unique
+  password        String
+  role            String        @default("USER")
+  avatar          String?
+  emailVerified   Boolean       @default(false)
+  verifyToken     String?       @unique
+  verifyExpiry    DateTime?
+  resetToken      String?       @unique
+  resetExpiry     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  comments        Comment[]
+  bookmarks       Bookmark[]
+  readHistory     ReadHistory[]
+  @@map("users")
+}
+
+model Series {
+  id          String     @id @default(cuid())
+  title       String
+  slug        String     @unique
+  description String?
+  author      String?
+  artist      String?
+  status      String     @default("ONGOING")
+  genres      String[]
+  rating      Float      @default(0)
+  views       Int        @default(0)
+  cover       String?
+  type        String     @default("MANHWA")
+  featured    Boolean    @default(false)
+  sourceUrl   String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  chapters    Chapter[]
+  comments    Comment[]
+  bookmarks   Bookmark[]
+  @@map("series")
+}
+
+model Chapter {
+  id          String        @id @default(cuid())
+  seriesId    String
+  title       String?
+  chapterNum  Float
+  views       Int           @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  series      Series        @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  pages       Page[]
+  readHistory ReadHistory[]
+  @@map("chapters")
+}
+
+model Page {
+  id        String  @id @default(cuid())
+  chapterId String
+  number    Int
+  imageUrl  String
+  chapter   Chapter @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  @@map("pages")
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  content   String
+  userId    String
+  seriesId  String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  series    Series   @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  @@map("comments")
+}
+
+model Bookmark {
+  id       String @id @default(cuid())
+  userId   String
+  seriesId String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  series   Series @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  @@unique([userId, seriesId])
+  @@map("bookmarks")
+}
+
+model ReadHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  chapterId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapter   Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  @@unique([userId, chapterId])
+  @@map("read_history")
+}
+
+model MirrorJob {
+  id         String   @id @default(cuid())
+  sourceUrl  String
+  sourceSite String?
+  status     String   @default("PENDING")
+  progress   Int      @default(0)
+  total      Int      @default(0)
+  message    String?
+  seriesId   String?
+  result     String?  @db.Text
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  @@map("mirror_jobs")
+}
+
+model Ad {
+  id        String     @id @default(cuid())
+  name      String
+  position  String
+  code      String     @db.Text
+  imageUrl  String?
+  linkUrl   String?
+  active    Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  @@map("ads")
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+  @@map("settings")
+}
