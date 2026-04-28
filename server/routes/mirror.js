@@ -460,7 +460,11 @@ router.post('/browser', adminMiddleware, async (req, res) => {
 // GET /api/mirror/bookmarklet — return JS script to run in browser console
 router.get('/bookmarklet', adminMiddleware, async (req, res) => {
   const { site } = req.query; // 'ikiru' or 'shinigami'
-  const apiUrl = (process.env.SERVER_URL || 'http://localhost:5000') + '/api';
+  
+  // Use the current request's origin (production URL) instead of hardcoded SERVER_URL
+  const origin = req.headers.origin || req.headers.referer?.replace(/\/[^/]*$/, '') || 'https://akirareads-production.up.railway.app';
+  const protocol = origin.startsWith('https') ? 'https' : 'http';
+  const apiUrl = `${protocol}://${origin.split('://')[1]}/api`;
   
   // Get admin token from request to include in bookmarklet
   const token = req.headers.authorization?.split(' ')[1] || '';
