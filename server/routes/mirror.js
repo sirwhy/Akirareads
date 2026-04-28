@@ -461,10 +461,11 @@ router.post('/browser', adminMiddleware, async (req, res) => {
 router.get('/bookmarklet', adminMiddleware, async (req, res) => {
   const { site } = req.query; // 'ikiru' or 'shinigami'
   
-  // Use the current request's origin (production URL) instead of hardcoded SERVER_URL
-  const origin = req.headers.origin || req.headers.referer?.replace(/\/[^/]*$/, '') || 'https://akirareads-production.up.railway.app';
-  const protocol = origin.startsWith('https') ? 'https' : 'http';
-  const apiUrl = `${protocol}://${origin.split('://')[1]}/api`;
+  // Use the current request's host (production URL) instead of hardcoded localhost
+  // This ensures script sends data to correct Railway URL
+  const reqHost = req.get('host') || 'akirareads-production.up.railway.app';
+  const protocol = req.get('proto') === 'https' || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+  const apiUrl = `${protocol}://${reqHost}/api`;
   
   // Get admin token from request to include in bookmarklet
   const token = req.headers.authorization?.split(' ')[1] || '';
