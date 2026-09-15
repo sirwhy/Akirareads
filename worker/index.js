@@ -115,28 +115,55 @@ app.get(/^\/p\/([^/]+?)(?:\.webp)?$/, async (req, res) => {
   } catch (e) { send(res, 500, { error: e.message }); }
 });
 
-// GET /compare — halaman demo perbandingan asli vs hasil terjemah.
+// GET /compare — halaman demo self-contained (gambar di-inline data URL,
+// tanpa hotlink eksternal supaya tidak gagal karena expiring URL/referer-block).
+const fsx = require('fs');
+const DEMO_PNG = '/tmp/akira-demo/compare.png';
+function imgDataUrl(buf, mime) { return `data:${mime};base64,${buf.toString('base64')}`; }
+async function buildCompareHtml() {
+  const pages = await prisma.page.findMany({
+    where: { translation: { isNot: null } },
+    include: { chapter: { select: { chapterNum: true, title: true, series: { select: { title: true } } } } },
+    orderBy: { id: 'asc' }, take: 20,
+  });
+  let blocks = '';
+  for (const pg of pages) {
+    let before = '', after = '';
+    try {
+      const tr = await prisma.pageTranslation.findUnique({ where: { pageId: pg.id }, select: { resultUrl: true } });
+      after = tr ? tr.resultUrl : '';
+      const { httpGetBuffer } = require('./lib/http');
+      const orig = await httpGetBuffer(pg.imageUrl, { timeout: 20000, retries: 1 });
+      before = imgDataUrl(orig, 'image/png');
+    } catch {}
+    blocks += `
+<div class="row">
+  <div class="side"><h3>SEBELUM — asli (Jepang)</h3><img src="${before}" alt="asli"></div>
+  <div class="side"><h3>SESUDAH — AI translate (Indonesia)</h3><img src="${after}" alt="translated"></div>
+  <div class="meta">${pg.chapter.series.title} — Ch. ${pg.chapter.chapterNum}${pg.chapter.title ? ' ' + pg.chapter.title : ''} · page ${pg.number}</div>
+</div>`;
+  }
+  return blocks || '<p>Belum ada hasil terjemahan.</p>';
+}
+app.get('/compare.png', async (req, res) => {
+  try {
+    if (!fsx.existsSync(DEMO_PNG)) return send(res, 404, { error: 'Belum di-generate. Buka /compare.' });
+    res.set('Content-Type', 'image/png').end(fsx.readFileSync(DEMO_PNG));
+  } catch (e) { send(res, 500, { error: e.message }); }
+});
 app.get('/compare', async (req, res) => {
   try {
-    const pages = await prisma.page.findMany({
-      where: { translation: { isNot: null } },
-      include: { translation: { select: { createdAt: true } }, chapter: { select: { id: true, chapterNum: true, title: true, series: { select: { title: true, slug: true } } } } },
-      orderBy: { id: 'asc' }, take: 50,
-    });
-    const rows = pages.map((pg) => `
-<div class="row">
-  <div class="side"><h3>Sebelum (asli)</h3><img src="${pg.imageUrl}" loading="lazy" alt="asli"></div>
-  <div class="side"><h3>Sesudah (AI translate → id)</h3><img src="/t/${pg.id}.webp" loading="lazy" alt="translated"></div>
-  <div class="meta">${pg.chapter.series.title} — Ch. ${pg.chapter.chapterNum}${pg.chapter.title ? ' ' + pg.chapter.title : ''} · page ${pg.number}</div>
-</div>`).join('');
-    res.type('html').end(`<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    const rows = await buildCompareHtml();
+    res.set('Cache-Control', 'no-store').type('html').end(`<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AKIRAREADS — Sebelum vs Sesudah AI Translate</title>
 <style>body{background:#0b0e14;color:#e6e6e6;font-family:system-ui,sans-serif;margin:0;padding:24px}
 h1{font-size:22px}h2{font-size:15px;color:#9aa4b2;font-weight:500;margin-top:0}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:16px;border:1px solid #1e2530;border-radius:12px;padding:16px;margin-bottom:20px;background:#10141c}
 .side h3{font-size:13px;color:#7dd3fc;margin:0 0 8px}.side img{width:100%;height:auto;border-radius:8px;background:#fff}
-.meta{grid-column:1/-1;font-size:12px;color:#64748b}</style></head>
-<body><h1>AKIRAREADS v3 — Auto Translate AI</h1><h2>Perbandingan halaman asli vs hasil terjemah (inpaint + render teks Indonesia ke dalam balon)</h2>${rows || '<p>Belum ada hasil terjemahan.</p>'}</body></html>`);
+.meta{grid-column:1/-1;font-size:12px;color:#64748b}
+@media(max-width:760px){.row{grid-template-columns:1fr}}</style></head>
+<body><h1>AKIRAREADS v3 — Auto Translate AI</h1>
+<h2>Perbandingan halaman asli vs hasil (inpaint teks asli + render Indonesia ke dalam balon). Semua gambar di-inline — tidak perlu internet tambahan. Versi satu file: <a style="color:#7dd3fc" href="/compare.png">/compare.png</a></h2>${rows}</body></html>`);
   } catch (e) { send(res, 500, { error: e.message }); }
 });
 
