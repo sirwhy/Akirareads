@@ -1,0 +1,25 @@
+{
+  "name": "akira-reads-worker",
+  "version": "3.0.0",
+  "private": true,
+  "description": "AKIRAREADS v3 worker: mirror scraper + AI translate pipeline + GDrive backup. Deploy: Railway.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "postinstall": "prisma generate --schema=../prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "cheerio": "1.1.2",
+    "express": "4.21.2",
+    "node-cron": "3.0.3",
+    "sharp": "0.33.5",
+    "@resvg/resvg-js": "2.6.2"
+  },
+  "devDependencies": {
+    "prisma": "6.19.3"
+  }
+}

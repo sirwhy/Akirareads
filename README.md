@@ -1,87 +1,152 @@
-# 📖 AKIRAREADS v2.4
+# 📖 AKIRAREADS v3
 
-Platform baca manhwa, manga, manhua — dengan mirror otomatis, admin panel tersembunyi.
+Platform baca manhwa / manga / manhua dengan **AI auto-translate built-in**:
+teks asing di gambar dikenali, dihapus (inpaint), diterjemahkan, lalu ditulis
+ulang ke dalam balonnya — hasil akhirnya tetap satu gambar, siap baca bahasa
+Indonesia tanpa aplikasi translator.
 
----
+Arsitektur v3 (rebuild total dari v2.4):
 
-## 🔧 Fix di v2.4
-
-### ✅ MangaDex: Fix 100 Chapter Bug
-**Penyebab:** Kode lama pakai `limit: 100` (max MangaDex adalah 500) dan tidak ada filter bahasa → dapat chapter dari semua bahasa → duplikat → gagal insert → hanya 100 tersimpan.
-
-**Fix yang dilakukan:**
-- Limit dinaikkan ke **500 per request** (max yang diizinkan MangaDex)
-- Filter bahasa: prioritas **Bahasa Indonesia** dulu, lalu **English**, lalu semua bahasa
-- Deduplication berdasarkan nomor chapter (pilih bahasa terbaik)
-- Retry otomatis saat rate-limit (HTTP 429)
-- Progress update setiap 10 chapter
-
-### ✅ ikiru.id & shinigami.asia: Browser Import
-**Penyebab:** Kedua situs pakai Cloudflare anti-bot. CF cookies dari HAR tidak bisa dipakai di server lain karena terikat ke IP + TLS fingerprint browser.
-
-**Solusi: Browser Import** — kamu buka situs di browser sendiri (CF sudah lolos), jalankan script di Console, data otomatis terkirim ke server.
-
----
-
-## 🚀 Deploy Railway
-
-### Variables Backend
 ```
-DATABASE_URL=postgresql://...
-JWT_SECRET=string-random-panjang
-PORT=5000
-NODE_ENV=production
-SERVER_URL=https://[backend].up.railway.app
-CLIENT_URL=https://[frontend].up.railway.app
-ADMIN_EMAIL=email@kamu.com
-ADMIN_PASSWORD=PasswordKamu
-ADMIN_API_KEY=kunci-rahasia-admin
+┌───────────────────────────┐      ┌──────────────────────────────┐
+│  web/  Next.js 14         │      │  worker/  Node.js (Railway)  │
+│  (Vercel)                 │      │                              │
+│  • UI publik + admin      │      │  • Mirror scraper (MangaDex, │
+│  • API route handlers     │      │    Madara, komiku, dll)      │
+│  • Enqueue job → DB       │      │  • Pipeline AI translate     │
+└────────────┬──────────────┘      │    OCR+MT (Gemini/GPT/Groq)  │
+             │                     │  • Serve hasil /t/*.webp     │
+             ▼                     │  • Backup DB → Google Drive  │
+        Postgres (Neon / Railway) ◄┘  (polling job, tanpa API     │
+                                      antar-service)              │
 ```
 
-### Variables Frontend
-```
-REACT_APP_API_URL=https://[backend].up.railway.app/api
-REACT_APP_ADMIN_KEY=kunci-rahasia-admin
-```
+Kedua proses berbagi **satu database Postgres**. Web hanya menulis job
+(`MirrorJob`, `TranslateJob` berstatus `PENDING`); worker mem-poll, mengerjakan
+pekerjaan berat (scraper + AI), dan menulis hasilnya (`Page.translatedUrl`).
+Reader di browser tinggal menyalakan toggle **🇮🇩 AI Translate**.
 
 ---
 
-## 📚 Cara Mirror Manga
+## ✨ Fitur
 
-### MangaDex (Otomatis penuh)
-1. Buka mangadex.org → cari judul
-2. Salin URL: `https://mangadex.org/title/UUID/...`
-3. Admin → Mirror → paste → **Import**
-4. Semua chapter + halaman diimport otomatis ✅
+- **Auto-translate manhwa satu klik** — per chapter atau satu seri penuh.
+  Pipeline: Vision-LLM deteksi balon + OCR + terjemah sekaligus → hapus teks
+  asli (inpaint warna balon) → render teks Indonesia dengan auto-fit font.
+- **Cache pintar** — halaman identik (repost/rerun) tidak di-OCR dua kali
+  (hash gambar + hash daftar URL chapter).
+- **Mirror otomatis** — tempel URL MangaDex → semua chapter + halaman ter-import
+  (fix bug 100 chapter v2: paginasi 500/request, prioritas bahasa id→en, dedup).
+- **Browser Import** — untuk situs anti-bot Cloudflare (ikiru, shinigami, dll):
+  admin generate script, jalankan di Console browsermu, data mengalir ke server.
+  (Alur yang sama: worker men-download halaman via MangaDex at-home CDN.)
+- **Reader portabel** — mode vertikal/single, keyboard nav, atur lebar & zoom,
+  bookmark, riwayat baca, komentar.
+- **Admin tersembunyi** — `/api/admin/*`, `/api/mirror/*`, dll membalas **404**
+  (bukan 401) tanpa `X-Admin-Key` / JWT admin.
+- **Backup Google Drive otomatis** — dump DB tiap hari (cron), retensi 7 versi.
 
-### ikiru.id / shinigami.asia (Browser Import)
-1. Admin → Mirror → tab **"Browser Import"**
-2. Pilih website (ikiru atau shinigami)
-3. Klik **"Generate Script"**
-4. Buka halaman series di browser kamu
-5. Tekan **F12** → tab **Console**
-6. **Copy-paste script** → tekan Enter
-7. Tunggu alert "✅ Berhasil dikirim!"
-8. Kembali ke admin panel → lihat hasilnya
+## 🤖 Provider AI (pilih salah satu, gratis/murah)
 
-### komiku.id / Madara sites lain
-- Sama seperti Single URL import
-- Berhasil jika Cloudflare tidak aktif di waktu itu
-- Jika gagal 403: gunakan Browser Import yang sama
+| Provider  | Model          | Gratis?                     |
+|-----------|----------------|-----------------------------|
+| Gemini    | gemini-2.0-flash | ✅ ya (AI Studio, rate limit longgar) — **direkomendasikan** |
+| Groq      | llama-4 vision | ✅ ya (free tier)           |
+| OpenAI    | gpt-4o-mini    | ❌ bayar (~$0.6/1K gambar)  |
 
----
+Chain fallback: `TRANSLATE_PROVIDER=auto` → Gemini → OpenAI → Groq.
 
-## 🔒 Admin Panel Tersembunyi
-- `/api/admin/*` return **404** tanpa token (bukan 401)
-- **ADMIN_API_KEY** wajib sama di backend dan frontend
-- Tidak ada link ke `/admin` di website publik
+## 🚀 Deploy
 
----
+### 1. Database (sekali saja)
 
-## 🔑 Reset Password Admin Darurat
-Set `RESET_ADMIN_KEY=kunci123` di Railway backend, lalu:
+Railway: tambah **Postgres** → copy `DATABASE_URL` (internal), ATAU Neon free
+plan (URL `?sslmode=require`). URL yang sama dipakai web & worker.
+
+### 2. Worker di Railway
+
+1. Repo ini → Railway project baru → **Deploy from GitHub**, set
+   **Root Directory = `worker`**.
+2. Variables:
+
+   ```
+   DATABASE_URL   = postgres://...        # sama dengan web
+   ADMIN_API_KEY  = <kunci acak>
+   WORKER_URL     = https://<worker>.up.railway.app   # boleh kosong dulu, isi setelah URL jadi
+   GEMINI_API_KEY = <isi minimal 1 provider>
+   AUTO_TRANSLATE = 1
+   BACKUP_CRON    = 0 3 * * *             # opsional
+   GOOGLE_SA_JSON / GDRIVE_FOLDER_ID      # opsional (lihat §Backup)
+   ```
+3. Public Networking → domain `https://…up.railway.app`. Health check `/health`.
+
+### 3. Web di Vercel
+
+1. Import repo → **Root Directory = `web`**, framework Next.js terdeteksi.
+2. Environment Variables:
+
+   ```
+   DATABASE_URL       = postgres://...    # URL yang sama
+   JWT_SECRET         = <string panjang acak>
+   ADMIN_API_KEY      = <sama persis dengan worker>
+   NEXT_PUBLIC_ADMIN_KEY = <sama juga>
+   ADMIN_EMAIL        = email@kamu.com
+   ADMIN_PASSWORD     = <password admin awal>
+   WORKER_URL         = https://<worker>.up.railway.app
+   ```
+3. Deploy. Seed admin (dari mana saja yang punya akses DB + node):
+
+   ```bash
+   npm install
+   npx prisma db push --schema=prisma/schema.prisma
+   ADMIN_EMAIL=... ADMIN_PASSWORD=... node prisma/seed.js
+   ```
+   (Atau login pertama: halaman `/admin/login` akan otomatis membuat akun ADMIN
+   dari `ADMIN_EMAIL`/`ADMIN_PASSWORD` jika belum ada.)
+
+### 4. Alur pakai
+
+1. Buka `https://<vercel>/admin` → login admin.
+2. **Mirror** → tempel URL MangaDex → Import → worker mengerjakan (progress live).
+3. Selesai mirror, buka **Terjemahan** → pilih seri → *Translate chapter* atau
+   *Translate semua* — worker OCR + terjemah per halaman.
+4. Reader: buka chapter → toggle **🇮🇩 AI Translate**. Selesai.
+
+## 💾 Backup Google Drive
+
+1. Buat **Service Account** di Google Cloud → key JSON → aktifkan **Drive API**.
+2. Share folder Drive pilihanmu ke email service account (`Editor`).
+3. `GDRIVE_FOLDER_ID` = ID folder (segmen URL `/folders/<ID>`);
+   `GOOGLE_SA_JSON` = base64 file JSON key (aman untuk env var).
+4. Cron `BACKUP_CRON` (default jam 3 pagi) menyimpan dump JSON.gz, simpan 7
+   terakhir. Manual: `POST <worker>/admin/backup` dengan header `X-Admin-Key`.
+
+## 🧪 Development lokal
+
 ```bash
-curl -X POST https://[backend]/api/auth/reset-admin \
-  -H "Content-Type: application/json" \
-  -d '{"key":"kunci123","password":"PasswordBaru"}'
+cp .env.example .env                       # isi DATABASE_URL (Neon dev) dsb.
+npm install                                # generate prisma client
+npx prisma db push
+
+cd web && npm install && npm run dev       # http://localhost:3000
+cd ../worker && npm install && npm start   # http://localhost:8080  (PORT env)
+# env worker: WORKER_URL=http://localhost:8080 AUTO_TRANSLATE=1
 ```
+
+## 📁 Struktur
+
+```
+akira-reads/
+├── prisma/          schema (shared) + seed admin
+├── web/             Next.js 14 — app/, components/, lib/, context/  (Vercel, root=web)
+└── worker/          Express + job loop — mirror/, translate/, backup.js  (Railway, root=worker)
+```
+
+## ❓ Troubleshooting
+
+- **Job tidak jalan** → cek log Railway worker (`[loop] siap`), `DATABASE_URL`
+  worker & web harus sama, `WORKER_URL` sudah diisi agar tombol gambar hasil valid.
+- **Translate gagal semua** → `GEMINI_API_KEY`/provider belum diisi (pesan error
+  job menyebutkannya).
+- **Gambar hasil 404** → `WORKER_URL` di web berbeda dari URL publik worker.
+- **Mirror 403 Cloudflare** → gunakan tab **Browser Import** (sama seperti v2).

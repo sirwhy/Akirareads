@@ -1,18 +1,23 @@
 {
-  "name": "akirareads",
-  "version": "2.1.0",
-  "scripts": {
-    "install-all": "npm install && cd server && npm install && cd ../client && npm install",
-    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm start\"",
-    "dev:server": "cd server && npm run dev",
-    "dev:client": "cd client && npm start",
-    "build:client": "cd client && npm run build",
-    "db:push": "cd server && npx prisma db push",
-    "db:generate": "cd server && npx prisma generate",
-    "db:seed": "cd server && node src/seed.js",
-    "start": "cd server && npm start"
+  "name": "akira-reads",
+  "version": "3.0.0",
+  "private": true,
+  "description": "AKIRAREADS v3 \u2014 manhwa/manga reader dengan AI auto-translate (OCR \u2192 inpaint \u2192 translate \u2192 inpaint balik), deploy Vercel + Railway",
+  "engines": {
+    "node": ">=20"
   },
-  "devDependencies": {
-    "concurrently": "^8.2.2"
+  "scripts": {
+    "postinstall": "prisma generate",
+    "build": "cd web && npm run build",
+    "dev": "cd web && npm run dev",
+    "worker": "cd worker && node index.js"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "prisma": "6.19.3",
+    "bcryptjs": "3.0.2"
   }
 }
