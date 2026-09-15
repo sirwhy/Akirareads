@@ -3,9 +3,11 @@
 // siap-simpan; pemanggil (index.js) yang menulis DB + progress.
 const crypto = require('crypto');
 const sharp = require('sharp');
+const env = require('../env');
 const prisma = require('../../db');
 const { httpGetBuffer } = require('../http');
 const { visionOcrTranslate } = require('./providers');
+const { freeOcrTranslate } = require('./free');
 const { renderTranslated } = require('../render');
 
 // Cache level-PAGE: sha256(buffer gambar) disimpan sbg PageTranslation.chapterHash
@@ -41,7 +43,20 @@ async function translatePage(page, targetLang) {
   const meta = await sharp(buf, { failOn: 'none' }).metadata();
   const mime = meta.format === 'png' ? 'image/png' : meta.format === 'webp' ? 'image/webp' : 'image/jpeg';
 
-  const { regions, sourceLang, ocrProvider, mtProvider } = await visionOcrTranslate(buf, mime, targetLang || 'id');
+  let ocr;
+  const pref = (env('TRANSLATE_PROVIDER', 'auto').toLowerCase());
+  if (pref === 'free' || pref === 'tesseract') {
+    ocr = await freeOcrTranslate(buf, targetLang || 'id');
+  } else {
+    try {
+      ocr = await visionOcrTranslate(buf, mime, targetLang || 'id');
+    } catch (e) {
+      // Vision LLM tidak terkonfigurasi/gagal total -> fallback mode gratis.
+      if (pref !== 'auto') throw e;
+      ocr = await freeOcrTranslate(buf, targetLang || 'id');
+    }
+  }
+  const { regions, sourceLang, ocrProvider, mtProvider } = ocr;
 
   if (!regions.length) {
     // Tanpa teks: hasil = re-encode webp murah (hemat bandwidth), textCount 0.
