@@ -50,11 +50,13 @@ Reader di browser tinggal menyalakan toggle **🇮🇩 AI Translate**.
 
 | Provider  | Model          | Gratis?                     |
 |-----------|----------------|-----------------------------|
-| Gemini    | gemini-2.0-flash | ✅ ya (AI Studio, rate limit longgar) — **direkomendasikan** |
+| **Gratis penuh (tanpa key)** | tesseract.js OCR + MyMemory MT | ✅ ya — otomatis aktif kalau semua vision key kosong. Terbaik untuk scan English/Indo font digital (webtoon/manhwa); font artistik JP kasar |
+| Gemini    | gemini-2.0-flash | ✅ ya (AI Studio, rate limit longgar) — **kualitas terbaik, direkomendasikan** |
 | Groq      | llama-4 vision | ✅ ya (free tier)           |
 | OpenAI    | gpt-4o-mini    | ❌ bayar (~$0.6/1K gambar)  |
 
-Chain fallback: `TRANSLATE_PROVIDER=auto` → Gemini → OpenAI → Groq.
+Chain: `TRANSLATE_PROVIDER=auto` → Gemini → OpenAI → Groq → **fallback mode gratis**
+(kalau semua vision gagal/tidak ada key). Paket: `free|tesseract` memaksa mode gratis.
 
 ## 🚀 Deploy
 
@@ -73,7 +75,7 @@ plan (URL `?sslmode=require`). URL yang sama dipakai web & worker.
    DATABASE_URL   = postgres://...        # sama dengan web
    ADMIN_API_KEY  = <kunci acak>
    WORKER_URL     = https://<worker>.up.railway.app   # boleh kosong dulu, isi setelah URL jadi
-   GEMINI_API_KEY = <isi minimal 1 provider>
+   GEMINI_API_KEY = <opsional; kosong = mode gratis tesseract+MyMemory>
    AUTO_TRANSLATE = 1
    BACKUP_CRON    = 0 3 * * *             # opsional
    GOOGLE_SA_JSON / GDRIVE_FOLDER_ID      # opsional (lihat §Backup)
