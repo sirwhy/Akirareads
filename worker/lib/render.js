@@ -25,15 +25,17 @@ function median(arr) {
   return s.length ? s[Math.floor(s.length / 2)] : 0;
 }
 
-// Sampling strip LUAR bbox (offset 6px): hingga 40 pixel -> median per channel.
+// Sampling strip LUAR bbox: kumpulkan semua pixel dari 4 strip (bukan 1 per
+// strip), lalu median per channel = dominan; fallback warna tepi terdekat.
 // `base` = fungsi pabrik sharp-instance (extract perlu instance baru per pakai).
 async function sampleBg(base, W, H, bx, by, bw, bh) {
   const rects = [
-    { x: bx, y: by - 7, w: bw, h: 1 },
-    { x: bx, y: by + bh + 6, w: bw, h: 1 },
-    { x: bx - 7, y: by, w: 1, h: bh },
-    { x: bx + bw + 6, y: by, w: 1, h: bh },
+    { x: bx, y: by - 9, w: bw, h: 3 },
+    { x: bx, y: by + bh + 6, w: bw, h: 3 },
+    { x: bx - 9, y: by, w: 3, h: bh },
+    { x: bx + bw + 6, y: by, w: 3, h: bh },
   ];
+  const R = [], G = [], B = [];
   for (const r of rects) {
     const x = Math.max(0, r.x), y = Math.max(0, r.y);
     const w = Math.min(r.w, W - x), h = Math.min(r.h, H - y);
@@ -42,26 +44,25 @@ async function sampleBg(base, W, H, bx, by, bw, bh) {
       const { data, info } = await base().extract({ left: x, top: y, width: w, height: h }).raw().toBuffer({ resolveWithObject: true });
       const ch = info.channels || 3;
       const n = Math.floor(data.length / ch);
-      const step = Math.max(1, Math.floor(n / 40));
-      const R = [], G = [], B = [];
+      const step = Math.max(1, Math.floor(n / 120));
       for (let i = 0; i < n; i += step) { R.push(data[i * ch]); G.push(data[i * ch + 1]); B.push(data[i * ch + 2]); }
-      if (!R.length) continue;
-      const h2 = (v) => Math.round(v).toString(16).padStart(2, '0');
-      return '#' + h2(median(R)) + h2(median(G)) + h2(median(B));
     } catch {}
   }
-  return null;
+  if (R.length < 8) return null;
+  const h2 = (v) => Math.round(v).toString(16).padStart(2, '0');
+  return '#' + h2(median(R)) + h2(median(G)) + h2(median(B));
 }
 
-// Word-wrap dengan estimasi lebar karakter; auto-shrink fs 10% per iterasi
-// s/d muat (max lines = floor(h/(fs*1.25))). Setelah 8 shrink, izinkan spill
-// 15% tinggi region sebelum ukuran terus turun.
-function layout(text, bw, bh, size) {
+// Word-wrap dengan estimasi lebar karakter; mulai dari font `startFs` (atau 28),
+// auto-shrink 10% per iterasi s/d muat (max lines = floor(h/(fs*1.25))).
+// Setelah 8 shrink, izinkan spill 15% tinggi region sebelum ukuran terus turun.
+function layout(text, bw, bh, size, startFs) {
   const words = String(text).split(/\s+/).filter(Boolean);
   if (!words.length) return { lines: [], fs: 28 };
   const factor = SIZE_FACTOR[size] || SIZE_FACTOR.m;
+  const fs0 = Math.min(72, Math.max(6, startFs || 28));
   for (let shrink = 0; shrink < 24; shrink++) {
-    const fs = Math.max(6, 28 * Math.pow(0.9, shrink));
+    const fs = Math.max(6, fs0 * Math.pow(0.9, shrink));
     const cw = factor * (fs / 28);
     const maxChars = Math.max(1, Math.floor((bw - fs * 0.5) / cw));
     const lines = [];
@@ -108,8 +109,11 @@ async function renderTranslated(imageBuffer, regions) {
 
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`;
   for (const r of regions || []) {
-    const bx = Math.round((r.x / 1000) * W), by = Math.round((r.y / 1000) * H);
-    const bw = Math.max(8, Math.round((r.w / 1000) * W)), bh = Math.max(8, Math.round((r.h / 1000) * H));
+    const px = !!r.px;
+    const bx = Math.round(px ? r.x : (r.x / 1000) * W);
+    const by = Math.round(px ? r.y : (r.y / 1000) * H);
+    const bw = Math.max(8, Math.round(px ? r.w : (r.w / 1000) * W));
+    const bh = Math.max(8, Math.round(px ? r.h : (r.h / 1000) * H));
     const rx = Math.round(Math.min(bw, bh) / 4);
     const sample = await sampleBg(base, W, H, bx, by, bw, bh);
     const bg = sample || (r.bg && /^#[0-9a-f]{6}$/i.test(r.bg) ? r.bg : '#ffffff');
@@ -122,7 +126,10 @@ async function renderTranslated(imageBuffer, regions) {
       fill = lum(bg) > 128 ? '#000000' : '#ffffff';
       if (contrast(fill, bg) < 2.5) stroke = ` stroke="${esc(lum(bg) > 128 ? '#ffffff' : '#000000')}" stroke-width="2" paint-order="stroke"`;
     }
-    const { lines, fs } = layout(text, bw, bh, r.size || 'm');
+    const { lines, fs } = layout(text, bw, bh, r.size || 'm', r.sizePx);
+    // Guard: walau sudah shrink s/d fs<10 teks tetap tumpah jauh -> inpaint saja
+    // (kotak bersih) tanpa teks, daripada coretan kecil menumpuk.
+    if (fs < 10 && lines.length * fs * 1.25 > bh * 1.35) continue;
     const lh = fs * 1.25;
     const align = r.align === 'left' ? 'start' : r.align === 'right' ? 'end' : 'middle';
     const tx = align === 'start' ? bx + fs * 0.3 : align === 'end' ? bx + bw - fs * 0.3 : bx + bw / 2;
@@ -134,7 +141,6 @@ async function renderTranslated(imageBuffer, regions) {
     svg += '</text>';
   }
   svg += '</svg>';
-
   const png = new Resvg(svg, { fitTo: { mode: 'width', value: W } }).render().asPng();
   const webp = await base().flatten({ background: '#ffffff' })
     .composite([{ input: Buffer.from(png), blend: 'over' }])
