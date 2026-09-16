@@ -10,9 +10,11 @@ const { visionOcrTranslate } = require('./providers');
 const { freeOcrTranslate } = require('./free');
 const { renderTranslated } = require('../render');
 
-// Cache level-PAGE: sha256(buffer gambar) disimpan sbg PageTranslation.chapterHash
-// saat OCR sukses -> halaman repost identik reuse resultUrl tanpa API call.
-// Cache level-CHAPTER: chapter.hash sama + nomor halaman sama -> salin hasil.
+// Cache level-PAGE: sha256(gambar + PIPELINE_VERSION) disimpan sbg
+// PageTranslation.chapterHash -> repost identik reuse tanpa API call. Naikkan
+// PIPELINE_VERSION tiap kali kualitas OCR/render/MT berubah supaya hasil lama
+// tidak dipakai ulang. Cache level-CHAPTER: chapter.hash + nomor halaman sama.
+const PIPELINE_VERSION = 'v3.4-precluster-scrub';
 async function findCached(page, imgHash) {
   const hit = await prisma.pageTranslation.findFirst({ where: { chapterHash: imgHash }, take: 1 });
   if (hit) return hit;
@@ -29,7 +31,7 @@ async function findCached(page, imgHash) {
 
 async function translatePage(page, targetLang) {
   const buf = await httpGetBuffer(page.imageUrl, { timeout: 45000, retries: 2 });
-  const imgHash = crypto.createHash('sha256').update(buf).digest('hex');
+  const imgHash = crypto.createHash('sha256').update(buf).update(PIPELINE_VERSION).digest('hex');
 
   const cached = await findCached(page, imgHash);
   if (cached) {

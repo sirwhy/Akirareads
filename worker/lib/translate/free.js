@@ -89,8 +89,24 @@ function clusterWords(words) {
   return clusters;
 }
 
-// ─── MT MyMemory (gratis, tanpa key; ~50 kata/menit, 5000/hari IP) ──────────
-async function mtTranslate(text, langpair) {
+// ─── MT: LibreTranslate publik (utama, batch, lebih natural) + MyMemory ────
+async function ltBatch(texts, sl, tl) {
+  const u = (env('LIBRETRANSLATE_URL') || 'https://translate.disroot.org') + '/translate';
+  for (let i = 0; i < 2; i++) {
+    try {
+      const r = await fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ q: texts.map((t) => t.slice(0, 480)), source: sl, target: tl, format: 'text' }),
+        signal: AbortSignal.timeout(25000) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      const arr = Array.isArray(d.translatedText) ? d.translatedText : (typeof d.translatedText === 'string' && texts.length === 1 ? [d.translatedText] : null);
+      if (arr && arr.length === texts.length) return arr.map((t) => String(t || '').trim() || null);
+    } catch {}
+    await new Promise((s) => setTimeout(s, 1500 * (i + 1)));
+  }
+  return null;
+}
+async function mtTranslate(text, langpair) { // MyMemory satuan (fallback)
   const u = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text.slice(0, 480)) + '&langpair=' + langpair +
     (env('MYMEMORY_EMAIL') ? '&de=' + encodeURIComponent(env('MYMEMORY_EMAIL')) : '');
   for (let i = 0; i < 3; i++) {
@@ -100,10 +116,33 @@ async function mtTranslate(text, langpair) {
       const t = d && d.responseData && d.responseData.translatedText;
       if (d.responseStatus === 200 && t && !/MYMEMORY WARNING|QUERY LENGTH LIMIT/i.test(t)) return t;
     } catch {}
-    await new Promise((s) => setTimeout(s, 3000 * (i + 1)));
+    await new Promise((s) => setTimeout(s, 2000 * (i + 1)));
   }
   return null;
 }
+// Satu bahasa sumber -> batch LT sekali; item gagal/limit antre ke MyMemory.
+async function mtBatch(texts, sl, tl) {
+  const out = new Array(texts.length).fill(null);
+  if (!texts.length) return out;
+  const lt = await ltBatch(texts, sl, tl);
+  const need = [];
+  for (let i = 0; i < texts.length; i++) {
+    if (lt && lt[i]) out[i] = lt[i]; else need.push(i);
+  }
+  for (const i of need) {
+    out[i] = await mtTranslate(texts[i], sl + '|' + tl);
+    await new Promise((s) => setTimeout(s, 350));
+  }
+  return out;
+}
+// Hasil yang masih echoes sumber (>60% kata kembar) = MT gagal diam-diam.
+function isEcho(src, tgt) {
+  const norm = (t) => String(t).toLowerCase().split(/\s+/).map((w) => w.replace(/[^a-z]/g, '')).filter((w) => w.length >= 3);
+  const a = norm(src), b = norm(tgt);
+  if (a.length < 3 || b.length === 0) return false;
+  return b.filter((w) => a.includes(w)).length / b.length > 0.6;
+}
+const { casualize, residueWords, polishMap } = require('./casual');
 
 // ─── API utama ───────────────────────────────────────────────────────────────
 // freeOcrTranslate(imageBuffer, targetLang) -> { regions, sourceLang, ... }
@@ -122,18 +161,46 @@ async function freeOcrTranslate(imageBuffer, targetLang) {
   for (const psm of passes) {
     try { words = words.concat(parseTsv(await ocrTsv(imageBuffer, psm))); } catch {}
   }
-  // Dedup toleran posisi: kata sama dari psm berbeda (~dalam 14px) = duplikat;
-  // simpan conf tertinggi. Tanpa ini, kata duplet muncul 2x di teks cluster.
+  // Dedup berbasis tumpang tindih kotak: kata sama dari psm berbeda ditulis
+  // dengan offset >14px (psm 6/12 mengesamping tata letak) — toleransi lama
+  // 14px melewatkan duplet, dua versi masuk cluster, dan sampah kana psm6
+  // menyambung kata-kata asli jadi mega-cluster yang "menelan" balon kecil.
   const uniq = [];
   for (const wd of words) {
     const k0 = wd.text.toUpperCase();
     let dup = false;
-    for (const u of uniq) if (u.k === k0 && Math.abs(u.left - wd.left) < 14 && Math.abs(u.top - wd.top) < 14) { dup = true; if (wd.conf > u.conf) Object.assign(u, wd); break; }
-    if (dup) continue;
-    uniq.push({ ...wd, k: k0 });
+    for (const u of uniq) {
+      if (u.k !== k0) continue;
+      const ox = Math.max(0, Math.min(u.left + u.width, wd.left + wd.width) - Math.max(u.left, wd.left));
+      const oy = Math.max(0, Math.min(u.top + u.height, wd.top + wd.height) - Math.max(u.top, wd.top));
+      const small = Math.min(u.width * u.height, wd.width * wd.height);
+      if (small > 0 && (ox * oy) / small > 0.4) { dup = true; if (wd.conf > u.conf) Object.assign(u, wd); break; }
+    }
+    if (!dup) uniq.push({ ...wd, k: k0 });
   }
 
-  let clusters = clusterWords(uniq)
+  // Klasifikasi skrip PER HALAMAN dulu, LALU buang kata salah-skrip SEBELUM
+  // clustering: sampah kana halusinasi psm6/12 di halaman Latin dulu justru
+  // masuk cluster dan MENYAMBUNG kata-kata berjauhan jadi mega-cluster;
+  // filter pasca-cluster membuang tokennya tapi bbox-nya sudah membengkak.
+  let allLetters = 0, kanaLetters = 0;
+  for (const w of uniq) {
+    if (w.conf <= 60) continue;
+    allLetters += (w.text.match(/[A-Za-z\u3040-\u30ff\u4e00-\u9fff]/g) || []).length;
+    kanaLetters += (w.text.match(new RegExp(JP_RE, 'g')) || []).length;
+  }
+  const pageJa = allLetters > 0 && kanaLetters >= allLetters * 0.3;
+  const scrubbed = uniq.filter((w) => {
+    const jp = (w.text.match(new RegExp(JP_RE, 'g')) || []).length;
+    if (!pageJa && jp > 0 && jp >= w.text.replace(/\s/g, '').length * 0.34) return false;
+    if (pageJa) {
+      const lat = (w.text.match(/[A-Za-z]/g) || []).length;
+      if (jp === 0 && lat > 0 && lat < 5) return false;
+    }
+    return true;
+  });
+
+  let clusters = clusterWords(scrubbed)
     .filter((c) => (c.right - c.left) * (c.bottom - c.top) > 1800 && c.right - c.left > 45)
     .filter((c) => c.words.some((w) => w.conf > 50));
 
@@ -162,23 +229,22 @@ async function freeOcrTranslate(imageBuffer, targetLang) {
   }
   clusters = kept;
 
-  // Klasifikasi skrip PER HALAMAN dulu: pada halaman Latin (webtoon EN/ID),
-  // token berisi kana/han = halusinasi tesseract ("鶏 Wh す マ iN"). Hanya
-  // kata conf>60 yang dihitung — halusinasi kana di halaman Latin menaikkan
-  // rasio kalau semua kata ikut; halaman JP sejati didominasi kana (>30%).
-  let allLetters = 0, kanaLetters = 0;
-  for (const c of clusters) for (const w of c.words) {
-    if (w.conf <= 60) continue;
-    allLetters += (w.text.match(/[A-Za-z\u3040-\u30ff\u4e00-\u9fff]/g) || []).length;
-    kanaLetters += (w.text.match(new RegExp(JP_RE, 'g')) || []).length;
-  }
-  const pageJa = allLetters > 0 && kanaLetters >= allLetters * 0.3;
-
-  const regions = [];
+  // Fase 1: bangun kandidat region per cluster (bahasa sudah disaring pra-cluster).
+  const cands = [];
   let jaCount = 0;
   for (const c of clusters) {
     const ordered = c.words.sort((a, b) => a.top - b.top || a.left - b.left);
-    let text = ordered.map((w) => w.text).join(' ').replace(/\s+([,.!?、。])/g, '$1').trim();
+    // token berulang bersebelahan ("ALREADY? ALREADY") = psm ganda baca kata
+    // sama dg offset >14px — buang duplet; pengulangan artistik ("Good, good")
+    // jarang persis bersebelahan identik dan tetap terbaca natural tanpa ini.
+    const toks = [];
+    for (const w of ordered) {
+      const key = w.text.toUpperCase().replace(/[^A-Z0-9\u3040-\u30ff\u4e00-\u9fff]/g, '');
+      const prev = toks[toks.length - 1];
+      if (key && prev && prev.key === key && Math.abs(prev.top - w.top) < Math.max(prev.height, w.height)) continue;
+      toks.push({ key, text: w.text, top: w.top, height: w.height });
+    }
+    let text = toks.map((t) => t.text).join(' ').replace(/\s+([,.!?、。])/g, '$1').trim();
     // potong token sampah: campur skrip / anomali / salah skrip utk halaman ini
     text = text.split(/\s+/).filter((t) => {
       if (garbageToken(t)) return false;
@@ -192,38 +258,75 @@ async function freeOcrTranslate(imageBuffer, targetLang) {
     }).join(' ');
     if (text.replace(/\s/g, '').length < 6) continue; // terlalu pendek = hampir pasti noise/SFX
     // halusinasi kecil: tidak ada satu pun kata >=3 karakter (mis. "yi OH. IS? IT")
-    if (!ordered.length || !text.split(/\s+/).some((w) => w.replace(/[^A-Za-z\u3040-\u30ff\u4e00-\u9fff]/g, '').length >= 3)) continue;
+    if (!ordered.length || !text.split(/\s+/).some((w) => w.replace(/[^A-Za-z0-9\u3040-\u30ff\u4e00-\u9fff]/g, '').length >= 3)) continue;
     const isJa = (text.match(new RegExp(JP_RE, 'g')) || []).length >= Math.max(2, text.length * 0.2);
     if (isJa) jaCount++;
     // lewati baris yang murni hasil noise: tanpa vokal dan tidak JP
     if (!isJa && !/[aeiou]/i.test(text)) continue;
-    const id = await mtTranslate(text, isJa ? 'ja|' + tl : 'en|' + tl);
-    if (!id) continue;
     const hPx = Math.max(6, Math.round((c.bottom - c.top) * sy));
     const wPx = Math.max(6, Math.round((c.right - c.left) * sx));
-    // Font asli = median tinggi glyph kata (bukan tinggi cluster ÷ jumlah kata
-    // yang salah utk multi-baris), skala ke piksel base render.
     const hs = ordered.map((w) => w.height).sort((a, b) => a - b);
     const estFont = Math.max(10, Math.min(64, Math.round((hs[Math.floor(hs.length / 2)] || 16) * sy) || 14));
-    // Kotak hasil harus cukup luas utk teks terjemah pada font ini; kalau tidak,
-    // font diturunkan (render.js shrink) sampai batas 10px — di bawah itu, buang.
-    const chars = id.replace(/\s/g, '').length;
-    const capArea = wPx * hPx;
-    const minArea = chars * (estFont * 0.55) * estFont * 1.2;
-    if (estFont < 11 && capArea < minArea) continue;
-
     const pad = 4;
     const x = Math.max(0, Math.round(c.left * sx) - pad);
     const y = Math.max(0, Math.round(c.top * sy) - pad);
     const w = Math.min(W - x, wPx + pad * 2);
     const h = Math.min(H - y, hPx + pad * 2);
-    regions.push({ x, y, w, h, px: true, text, translation: id, color: '#111111', sizePx: estFont, align: 'center' });
+    cands.push({ x, y, w, h, px: true, text, lang: isJa ? 'ja' : 'en', sizePx: estFont });
+  }
+
+  // Fase 2: MT batch per bahasa sumber (LibreTranslate sekali jalan; item
+  // gagal -> MyMemory satuan). Retry sekali utk hasil echo (=MT gagal diam).
+  const regions = [];
+  let mtUsed = 'libretranslate+mymemory';
+  for (const lang of ['en', 'ja']) {
+    const group = cands.filter((c) => c.lang === lang);
+    if (!group.length) continue;
+    let outs = await mtBatch(group.map((c) => c.text), lang, tl);
+    const retry = [];
+    for (let i = 0; i < group.length; i++) {
+      if (outs[i] && isEcho(group[i].text, outs[i]) && group[i].text.length > 12) retry.push(i);
+    }
+    if (retry.length) {
+      const again = await mtBatch(retry.map((i) => group[i].text), lang, tl);
+      retry.forEach((i, k) => { if (again[k]) outs[i] = again[k]; });
+    }
+    for (let i = 0; i < group.length; i++) {
+      const c = group[i];
+      let id = outs[i];
+      if (!id) continue; // dua MT mati -> region ini lewat (bukan seluruh halaman)
+      if (tl === 'id') id = casualize(id);
+      // muatkah di kotaknya? (guard lama, kini pd hasil akhir)
+      const chars = id.replace(/\s/g, '').length;
+      const capArea = c.w * c.h;
+      const minArea = chars * (c.sizePx * 0.55) * c.sizePx * 1.2;
+      if (c.sizePx < 11 && capArea < minArea) continue;
+      regions.push({ ...c, translation: id, color: '#111111', align: 'center' });
+      delete regions[regions.length - 1].lang;
+    }
+  }
+  // Fase 3 (khusus id): residu Inggris disikat SEKALI batch per halaman —
+  // kamus frasa dulu, sisanya (kata asing tersisa) lewat MT; substitusi hanya
+  // bila padanan satu kata. Tanpa ini hasil gratis masih "THE OWNER SUDAH".
+  if (tl === 'id' && regions.length) {
+    const words = [...new Set(regions.flatMap((r) => residueWords(r.translation, r.text)))];
+    if (words.length) {
+      const outs = await mtBatch(words, 'en', 'id');
+      const wordMap = {};
+      words.forEach((w, i) => { const c = outs[i] && casualize(outs[i]); if (c && !/\s/.test(c) && c.toLowerCase() !== w.toLowerCase()) wordMap[w] = c; });
+      for (const r of regions) {
+        r.translation = polishMap(r.translation, wordMap);
+        const chars = r.translation.replace(/\s/g, '').length;
+        const minArea = chars * (r.sizePx * 0.55) * r.sizePx * 1.2;
+        if (r.sizePx < 11 && r.w * r.h < minArea) r.overflow = true;
+      }
+    }
   }
   return {
     regions,
-    sourceLang: jaCount > clusters.length / 2 ? 'ja' : 'en',
+    sourceLang: jaCount > cands.length / 2 ? 'ja' : 'en',
     ocrProvider: 'tesseract.js',
-    mtProvider: 'mymemory',
+    mtProvider: mtUsed,
   };
 }
-module.exports = { freeOcrTranslate, clusterWords, parseTsv, mtTranslate };
+module.exports = { freeOcrTranslate, clusterWords, parseTsv, mtTranslate, ocrTsv };
