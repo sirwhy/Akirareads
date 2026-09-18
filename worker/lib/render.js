@@ -5,7 +5,6 @@ const sharp = require('sharp');
 const { Resvg } = require('@resvg/resvg-js');
 
 const FONT_STACK = "'Noto Sans','DejaVu Sans',sans-serif";
-const SIZE_FACTOR = { s: 7.5, m: 9, l: 11.5, xl: 14 }; // px lebar karakter @ font 28px
 
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -120,6 +119,88 @@ async function interiorBg(base, W, H, bx, by, bw, bh) {
 // Word-wrap dengan METRIK PER-HURUF akurat (bukan hitung-char): faktor lebar
 // bold sans per kode karakter. Layout lama underestimasi kapital ~20% -> teks
 // meluber keluar kotak inpaint -> menimpa teks asli = "tumpang tindih".
+// Estimasi hardcode (A-Z = 0.78) tetap meleset jauh pada font nyata
+// (DejaVu Sans Bold: 'W' -29%, 'm' -38%), jadi tabel lebar diukur langsung
+// dari font yang benar-benar dipakai resvg — sekali, saat render pertama.
+let METRICS = null;
+let metricsP = null;
+// Lebar ADVANCE = ink("cc") - ink("c"): selisih dua render karakter yang sama
+// menghapus side-bearing, jadi hasilnya persis lebar langkah font. Spasi tanpa
+// ink -> dipakai selisih ink("a a") - ink("aa").
+//
+// Satu SVG raksasa berisi semua sel TIDAK bisa dipakai: pada beberapa sel
+// (I, X, i) resvg melaporkan ink selebar sel sehingga selisihnya 0. Jadi
+// kalibrasi batch dulu (cepat), lalu sel yang hasilnya tidak masuk akal
+// diukur ulang satu per satu (akurat). Hasil akhir identik dengan per-sel
+// penuh, tapi ~7x lebih cepat.
+const CAL_FS = 100;
+const CAL_CW = 360;
+const CAL_CH = 170;
+const CAL_ATTRS = `font-family="${FONT_STACK}" font-size="${CAL_FS}" font-weight="600" fill="#000000"`;
+const CAL_CELLS = (() => {
+  const cs = [];
+  for (let c = 33; c <= 126; c++) cs.push(String.fromCharCode(c));
+  return cs.map((c) => ({ key: c, one: c, two: c + c })).concat([{ key: ' ', one: 'a a', two: 'aa' }]);
+})();
+
+function inkSpan(data, info, x0, x1, y0, y1) {
+  let min = Infinity, max = -1;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      if (data[y * info.width + x] < 128) { if (x < min) min = x; if (x > max) max = x; }
+    }
+  }
+  return max < 0 ? 0 : max - min + 1;
+}
+async function renderInk(svg, w) {
+  const png = new Resvg(svg, { fitTo: { mode: 'width', value: w } }).render().asPng();
+  // PNG resvg transparan; tanpa flatten, alpha 0 -> grey 0 = "tinta" di mana-mana.
+  return sharp(Buffer.from(png)).flatten({ background: '#ffffff' })
+    .greyscale().raw().toBuffer({ resolveWithObject: true });
+}
+// Ukur satu sel dalam SVG sendiri: satu-satunya cara yang andal.
+async function cellAdv(cell) {
+  const W = CAL_FS * 4, H = CAL_CH * 2;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">`
+    + `<text x="0" y="${CAL_FS}" ${CAL_ATTRS}>${esc(cell.one)}</text>`
+    + `<text x="0" y="${CAL_FS + CAL_CH}" ${CAL_ATTRS}>${esc(cell.two)}</text></svg>`;
+  const { data, info } = await renderInk(svg, W);
+  const a = inkSpan(data, info, 0, info.width, 0, CAL_CH);
+  const b = inkSpan(data, info, 0, info.width, CAL_CH, info.height);
+  return cell.key === ' ' ? a - b : b - a;
+}
+async function calibrateMetrics() {
+  const n = CAL_CELLS.length;
+  const perRow = 24;
+  const rows = Math.ceil(n / perRow);
+  const W = CAL_CW * perRow, H = CAL_CH * 2 * rows;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">`;
+  CAL_CELLS.forEach((cell, i) => {
+    const x = (i % perRow) * CAL_CW, y = ((i / perRow) | 0) * CAL_CH * 2 + CAL_FS;
+    svg += `<text x="${x}" y="${y}" ${CAL_ATTRS}>${esc(cell.one)}</text>`;
+    svg += `<text x="${x}" y="${y + CAL_CH}" ${CAL_ATTRS}>${esc(cell.two)}</text>`;
+  });
+  svg += '</svg>';
+  const { data, info } = await renderInk(svg, W);
+  const adv = new Map();
+  const retry = [];
+  CAL_CELLS.forEach((cell, i) => {
+    const x0 = (i % perRow) * CAL_CW, x1 = Math.min(info.width, x0 + CAL_CW);
+    const y1 = ((i / perRow) | 0) * CAL_CH * 2 + CAL_CH;
+    const y2 = y1 + CAL_CH;
+    const a = inkSpan(data, info, x0, x1, y1 - CAL_CH, y1);
+    const b = inkSpan(data, info, x0, x1, y1, y2);
+    const d = cell.key === ' ' ? a - b : b - a;
+    // Tidak masuk akal: nol/negatif (sel rusak) atau mentok lebar sel (tinta bocor).
+    if (a > 0 && d > 0 && d < CAL_CW * 0.8) adv.set(cell.key, d); else retry.push(cell);
+  });
+  for (const cell of retry) {
+    const d = await cellAdv(cell);
+    if (d > 0) adv.set(cell.key, d);
+  }
+  METRICS = { fs: CAL_FS, adv };
+}
+// Fallback bila kalibrasi belum jalan (mis. layout dipanggil langsung di test).
 function charW(code) {
   if (code === 32) return 0.34;
   if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90)) return 0.78; // 0-9 A-Z
@@ -127,14 +208,27 @@ function charW(code) {
   return 0.62; // tanda baca/latin-1
 }
 function measure(s, fs) {
+  if (METRICS) {
+    let w = 0;
+    for (let i = 0; i < s.length; i++) {
+      const a = METRICS.adv.get(s[i]);
+      w += a != null ? a : 0.62 * METRICS.fs;
+    }
+    return w * (fs / METRICS.fs);
+  }
   let w = 0;
   for (let i = 0; i < s.length; i++) w += charW(s.charCodeAt(i)) * fs;
   return w;
 }
+// Kalibrasi sekali per proses; kegagalan tidak fatal (pakai tabel fallback).
+function ensureMetrics() {
+  if (!metricsP) metricsP = calibrateMetrics().catch(() => {});
+  return metricsP;
+}
 
 // auto-shrink 10% per iter s/d muat (max lines = floor(avail/(fs*1.22)));
 // setelah 8 shrink izinkan spill 15% tinggi. Return juga `widest` utk perluasan.
-function layout(text, bw, bh, size, startFs) {
+function layout(text, bw, bh, startFs) {
   const words = String(text).split(/\s+/).filter(Boolean);
   if (!words.length) return { lines: [], fs: 28, widest: 0 };
   const fs0 = Math.min(72, Math.max(6, startFs || 28));
@@ -161,8 +255,13 @@ function layout(text, bw, bh, size, startFs) {
   return { lines: [], fs: 0, widest: 0 }; // = tak muat sama sekali -> inpaint saja
 }
 
-// renderTranslated(imageBuffer, regions) -> { webp, thumb, width, height }
-async function renderTranslated(imageBuffer, regions) {
+// renderTranslated(imageBuffer, regions, opts) -> { webp, thumb, width, height, boxes }
+// opts.noText: gambar kotak/inpaint TANPA glyph. Kotak & pertumbuhannya identik
+// dengan render normal (layout tetap dihitung), jadi selisih pixel antara kedua
+// hasil = glyph semata — dipakai QA utk membuktikan teks tidak keluar kotak.
+async function renderTranslated(imageBuffer, regions, opts) {
+  const noText = !!(opts && opts.noText);
+  await ensureMetrics();
   // Materialisasi base dulu: sharp menjalankan extract SEBELUM resize, jadi
   // koordinat sampling harus terhadap piksel final (post-resize strip lebar).
   let meta = await sharp(imageBuffer, { failOn: 'none' }).metadata();
@@ -181,14 +280,39 @@ async function renderTranslated(imageBuffer, regions) {
   const boxes = []; // kotak yang sudah digambar — region berikutnya tak boleh menabrak
   const interA = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x))
     * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
-  const clash = (bx, by, bw, bh) => boxes.some((o) => interA({ x: bx, y: by, w: bw, h: bh }, o)
-    > 0.02 * Math.min(bw * bh, o.w * o.h));
-  for (const r of regions || []) {
+  // Ambang 0.2% (bukan 2%): kotak besar yang cuma menembus sudut kecil tetap
+  // terlihat sebagai teks menumpuk di layar. Hanya sentuhan tepi yang lolos.
+  const rawBox = (r) => {
     const px = !!r.px;
-    let bx = Math.round(px ? r.x : (r.x / 1000) * W);
-    let by = Math.round(px ? r.y : (r.y / 1000) * H);
-    let bw = Math.max(8, Math.round(px ? r.w : (r.w / 1000) * W));
-    let bh = Math.max(8, Math.round(px ? r.h : (r.h / 1000) * H));
+    return {
+      x: Math.round(px ? r.x : (r.x / 1000) * W),
+      y: Math.round(px ? r.y : (r.y / 1000) * H),
+      w: Math.max(8, Math.round(px ? r.w : (r.w / 1000) * W)),
+      h: Math.max(8, Math.round(px ? r.h : (r.h / 1000) * H)),
+    };
+  };
+  const rawAll = (regions || []).map(rawBox);
+  // Ambang 0.2% (bukan 2%): kotak besar yang cuma menembus sudut kecil tetap
+  // terlihat sebagai teks menumpuk di layar. Hanya sentuhan tepi yang lolos.
+  // Penghalang = kotak final yang sudah dipasang + KOTAK MENTAH region yang
+  // belum diproses: tanpa yang terakhir, region awal bisa tumbuh ke area yang
+  // dibutuhkan region berikutnya, dan region berikutnya terpaksa menumpuk.
+  const clash = (bx, by, bw, bh, idx) => {
+    const rect = { x: bx, y: by, w: bw, h: bh };
+    if (boxes.some((o) => interA(rect, o) > 0.002 * Math.min(bw * bh, o.w * o.h))) return true;
+    for (let k = idx + 1; k < rawAll.length; k++) {
+      const o = rawAll[k];
+      if (interA(rect, o) > 0.002 * Math.min(bw * bh, o.w * o.h)) return true;
+    }
+    return false;
+  };
+  for (let ri = 0; ri < (regions || []).length; ri++) {
+    const r = regions[ri];
+    const px = !!r.px;
+    let bx = rawAll[ri].x;
+    let by = rawAll[ri].y;
+    let bw = rawAll[ri].w;
+    let bh = rawAll[ri].h;
     const text = (r.translation || r.text || '').trim();
     // Jalur gratis (px): kotak teks -> kotak BALON penuh (teknik MIT: flood
     // terang berhenti di outline). Balon hasil tumbuh ditolak bila menabrak
@@ -196,14 +320,14 @@ async function renderTranslated(imageBuffer, regions) {
     let grown = false;
     if (px) {
       const g = await growBubble(base, W, H, bx, by, bw, bh);
-      if (g && g.w >= bw && g.h >= bh && g.w * g.h <= W * H * 0.25 && !clash(g.x, g.y, g.w, g.h)) {
+      if (g && g.w >= bw && g.h >= bh && g.w * g.h <= W * H * 0.25 && !clash(g.x, g.y, g.w, g.h, ri)) {
         bx = g.x; by = g.y; bw = g.w; bh = g.h; grown = true;
       }
     }
     // PRATATAKAN Teks: kotak tumbuh ke ruang kosong (bawah, atas, kiri, kanan)
     // s/d teks muat dengan font layak (>=70% ukuran asli, maks 24px); tabrakan
     // dgn kotak lain / tepi halaman / batas 25% halaman menghentikan perluasan.
-    let L = text ? layout(text, bw, bh, r.size || 'm', r.sizePx) : { lines: [], fs: 0, widest: 0 };
+    let L = text ? layout(text, bw, bh, r.sizePx) : { lines: [], fs: 0, widest: 0 };
     if (text) {
       const wantFs = Math.min(24, (r.sizePx || 28) * 0.7);
       for (let guard = 0; guard < 14; guard++) {
@@ -219,11 +343,11 @@ async function renderTranslated(imageBuffer, regions) {
           else nw += stepX;
           if (nx < 0 || ny < 0 || nx + nw > W || ny + nh > H) continue;
           if (nw * nh > W * H * 0.25) continue;
-          if (clash(nx, ny, nw, nh)) continue;
+          if (clash(nx, ny, nw, nh, ri)) continue;
           bx = nx; by = ny; bw = nw; bh = nh; grewOk = true; break;
         }
         if (!grewOk) break;
-        const lay = layout(text, bw, bh, r.size || 'm', r.sizePx);
+        const lay = layout(text, bw, bh, r.sizePx);
         if (lay.lines.length) L = lay; else break; // tak akan muat — berhenti tumbuh
       }
     }
@@ -236,7 +360,7 @@ async function renderTranslated(imageBuffer, regions) {
     svg += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="${rx}" fill="${esc(bg)}"/>`;
     // Teks HANYA digambar bila terbukti muat; selain itu inpaint polos —
     // coretan meluber ke luar kotak menimpa gambar = keluhan "tumpang tindih".
-    if (!L.lines.length || L.widest > bw || L.lines.length * L.fs * 1.22 > bh * 1.16) continue;
+    if (noText || !L.lines.length || L.widest > bw || L.lines.length * L.fs * 1.22 > bh * 1.16) continue;
     let fill = r.color && /^#[0-9a-f]{6}$/i.test(r.color) ? r.color : '#111111';
     let stroke = '';
     if (contrast(fill, bg) < 2.5) {
@@ -264,4 +388,4 @@ async function renderTranslated(imageBuffer, regions) {
   return { webp, thumb, width: outMeta.width, height: outMeta.height, boxes };
 }
 
-module.exports = { renderTranslated, sampleBg, interiorBg, growBubble, layout, contrast };
+module.exports = { renderTranslated, sampleBg, interiorBg, growBubble, layout, contrast, measure, ensureMetrics, calibrateMetrics };
