@@ -13,20 +13,11 @@ const { renderTranslated } = require('../render');
 // Cache level-PAGE: sha256(gambar + PIPELINE_VERSION) disimpan sbg
 // PageTranslation.chapterHash -> repost identik reuse tanpa API call. Naikkan
 // PIPELINE_VERSION tiap kali kualitas OCR/render/MT berubah supaya hasil lama
-// tidak dipakai ulang. Cache level-CHAPTER: chapter.hash + nomor halaman sama.
+// tidak dipakai ulang. Halaman yang belum berubah tapi dibuat versi pipeline
+// lama otomatis tidak cocok (hash ikut berubah) -> diterjemahkan ulang.
 const PIPELINE_VERSION = 'v3.6-metrik-font-nyata-perpass';
 async function findCached(page, imgHash) {
-  const hit = await prisma.pageTranslation.findFirst({ where: { chapterHash: imgHash }, take: 1 });
-  if (hit) return hit;
-  const chHash = page.chapter && page.chapter.hash;
-  if (chHash) {
-    const other = await prisma.pageTranslation.findFirst({
-      where: { chapterHash: chHash, page: { number: page.number, NOT: { id: page.id } } },
-      orderBy: { createdAt: 'asc' },
-    });
-    if (other) return other;
-  }
-  return null;
+  return prisma.pageTranslation.findFirst({ where: { chapterHash: imgHash }, take: 1 });
 }
 
 async function translatePage(page, targetLang) {

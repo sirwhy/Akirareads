@@ -33,11 +33,6 @@ async function processJob(job) {
     done++;
     const pct = total ? Math.floor((done / total) * 100) : 100;
     try {
-      if (page.translatedUrl) {
-        await setJob(job.id, { done, progress: pct });
-        ok++;
-        continue;
-      }
       let out;
       try {
         out = await translatePage(page, targetLang);
